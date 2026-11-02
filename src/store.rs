@@ -49,6 +49,119 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER images_delete AFTER DELETE ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     // 6: tasks for a person, which agents leave alone.
     "ALTER TABLE tasks ADD COLUMN human INTEGER NOT NULL DEFAULT 0;",
+    // 7: an optional GitLab.com merge request linked to a task. Tokens deliberately
+    // never enter this synced database; see gitlab.rs.
+    "ALTER TABLE tasks ADD COLUMN gitlab_mr TEXT;",
+    // 8: the personal planning foundation. All links are optional so existing boards
+    // stay valid, while a project belongs to at most one life area.
+    "CREATE TABLE life_areas (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         slug TEXT NOT NULL UNIQUE,
+         name TEXT NOT NULL,
+         color TEXT,
+         position REAL NOT NULL,
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     );
+     CREATE TABLE journeys (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         life_area_id INTEGER NOT NULL REFERENCES life_areas(id) ON DELETE CASCADE,
+         title TEXT NOT NULL,
+         purpose TEXT NOT NULL DEFAULT '',
+         target_date TEXT,
+         status TEXT NOT NULL DEFAULT 'active',
+         position REAL NOT NULL,
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     );
+     CREATE TABLE milestones (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         journey_id INTEGER NOT NULL REFERENCES journeys(id) ON DELETE CASCADE,
+         title TEXT NOT NULL,
+         target_date TEXT,
+         status TEXT NOT NULL DEFAULT 'planned',
+         position REAL NOT NULL,
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     );
+     CREATE INDEX journeys_by_area ON journeys(life_area_id, position);
+     CREATE INDEX milestones_by_journey ON milestones(journey_id, position);
+     ALTER TABLE projects ADD COLUMN life_area_id INTEGER REFERENCES life_areas(id) ON DELETE SET NULL;
+     ALTER TABLE tasks ADD COLUMN journey_id INTEGER REFERENCES journeys(id) ON DELETE SET NULL;
+     ALTER TABLE tasks ADD COLUMN milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL;
+     CREATE TRIGGER life_areas_insert AFTER INSERT ON life_areas BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER life_areas_update AFTER UPDATE ON life_areas BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER life_areas_delete AFTER DELETE ON life_areas BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER journeys_insert AFTER INSERT ON journeys BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER journeys_update AFTER UPDATE ON journeys BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER journeys_delete AFTER DELETE ON journeys BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER milestones_insert AFTER INSERT ON milestones BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER milestones_update AFTER UPDATE ON milestones BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER milestones_delete AFTER DELETE ON milestones BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
+    // 9: the daily execution layer. Dates are calendar dates in the user's local
+    // browser, and priorities are deliberately limited by the API to three per day.
+    "ALTER TABLE tasks ADD COLUMN scheduled_for TEXT;
+     CREATE INDEX tasks_by_scheduled_for ON tasks(scheduled_for, position);
+     CREATE TABLE daily_priorities (
+         day TEXT NOT NULL,
+         task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+         position INTEGER NOT NULL,
+         PRIMARY KEY(day, task_id)
+     );
+     CREATE INDEX daily_priorities_by_day ON daily_priorities(day, position);
+     CREATE TRIGGER daily_priorities_insert AFTER INSERT ON daily_priorities BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER daily_priorities_delete AFTER DELETE ON daily_priorities BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
+    // 10: a short list of outcomes gives the week a direction beyond its scheduled tasks.
+    "CREATE TABLE weekly_outcomes (
+         week_start TEXT NOT NULL,
+         position INTEGER NOT NULL,
+         title TEXT NOT NULL,
+         PRIMARY KEY(week_start, position)
+     );
+     CREATE TRIGGER weekly_outcomes_insert AFTER INSERT ON weekly_outcomes BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER weekly_outcomes_update AFTER UPDATE ON weekly_outcomes BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER weekly_outcomes_delete AFTER DELETE ON weekly_outcomes BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
+    // 11: lightweight recurring habits and their local-calendar check-ins.
+    "CREATE TABLE habits (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         title TEXT NOT NULL,
+         position REAL NOT NULL,
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     );
+     CREATE TABLE habit_checks (
+         habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+         day TEXT NOT NULL,
+         PRIMARY KEY(habit_id, day)
+     );
+     CREATE INDEX habit_checks_by_day ON habit_checks(day);
+     CREATE TRIGGER habits_insert AFTER INSERT ON habits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER habits_update AFTER UPDATE ON habits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER habits_delete AFTER DELETE ON habits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER habit_checks_insert AFTER INSERT ON habit_checks BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER habit_checks_delete AFTER DELETE ON habit_checks BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
+    // 12: local job records and their in-app notifications. The provider boundary is
+    // deliberately import-only: no scraping, credentials, emails or schedulers run.
+    "CREATE TABLE job_preferences (
+         id INTEGER PRIMARY KEY CHECK(id = 1), skills TEXT NOT NULL, locations TEXT NOT NULL,
+         excluded_requirements TEXT NOT NULL, preferred_age_hours INTEGER NOT NULL DEFAULT 24,
+         fallback_age_days INTEGER NOT NULL DEFAULT 7, notifications_enabled INTEGER NOT NULL DEFAULT 1
+     );
+     INSERT INTO job_preferences(id,skills,locations,excluded_requirements) VALUES(1,'react,next.js,node.js,typescript,python,mern','kerala,bengaluru,dubai,gcc','java,.net');
+     CREATE TABLE jobs (
+         id INTEGER PRIMARY KEY AUTOINCREMENT, company TEXT NOT NULL, title TEXT NOT NULL,
+         location TEXT NOT NULL DEFAULT '', url TEXT, source TEXT NOT NULL DEFAULT '', posted_at TEXT,
+         source_date_note TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+         stage TEXT NOT NULL DEFAULT 'saved', notes TEXT NOT NULL DEFAULT '', follow_up_on TEXT,
+         dedupe_key TEXT NOT NULL UNIQUE, match_score INTEGER NOT NULL DEFAULT 0,
+         match_reasons TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     );
+     CREATE INDEX jobs_search ON jobs(stage, posted_at, match_score);
+     CREATE TABLE job_notifications (
+         id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+         message TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), read_at TEXT
+     );
+     CREATE TRIGGER jobs_insert AFTER INSERT ON jobs BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER jobs_update AFTER UPDATE ON jobs BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER job_notifications_insert AFTER INSERT ON job_notifications BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER job_notifications_update AFTER UPDATE ON job_notifications BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
 ];
 
 /// The colours a project can be given; the board maps each name to a shade.
@@ -100,6 +213,7 @@ pub struct Project {
     pub repos: Vec<String>,
     /// One of `PROJECT_COLORS`, or `None` when never picked.
     pub color: Option<String>,
+    pub life_area_id: Option<i64>,
     pub created_at: String,
     /// Tasks not in the last (done) column.
     pub open: i64,
@@ -116,6 +230,12 @@ pub struct Task {
     pub tags: Vec<String>,
     /// Work for a person: agents leave it alone, and `next_task` never picks it.
     pub human: bool,
+    /// A canonical GitLab.com merge request URL, when one is linked.
+    pub gitlab_mr: Option<String>,
+    pub journey_id: Option<i64>,
+    pub milestone_id: Option<i64>,
+    /// A local calendar date, `YYYY-MM-DD`, when the user intends to do it.
+    pub scheduled_for: Option<String>,
     pub status: String,
     pub position: f64,
     pub created_at: String,
@@ -160,6 +280,73 @@ pub struct TaskPatch {
     /// Comma-separated; replaces all the tags, and an empty string clears them.
     pub tags: Option<String>,
     pub human: Option<bool>,
+    /// A GitLab.com merge request URL; an empty value clears the link.
+    pub gitlab_mr: Option<String>,
+    /// `Some(None)` clears the link.
+    pub journey_id: Option<Option<i64>>,
+    /// `Some(None)` clears the link.
+    pub milestone_id: Option<Option<i64>>,
+    /// `Some(None)` removes the scheduled day.
+    pub scheduled_for: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LifeArea {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Journey {
+    pub id: i64,
+    pub life_area_id: i64,
+    pub title: String,
+    pub purpose: String,
+    pub target_date: Option<String>,
+    pub status: String,
+    pub milestones_done: i64,
+    pub milestones_total: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Milestone {
+    pub id: i64,
+    pub journey_id: i64,
+    pub title: String,
+    pub target_date: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Habit {
+    pub id: i64,
+    pub title: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HabitCheck {
+    pub habit_id: i64,
+    pub day: String,
+}
+
+fn journey_row(r: &Row) -> rusqlite::Result<Journey> {
+    Ok(Journey {
+        id: r.get(0)?,
+        life_area_id: r.get(1)?,
+        title: r.get(2)?,
+        purpose: r.get(3)?,
+        target_date: r.get(4)?,
+        status: r.get(5)?,
+        milestones_done: r.get(6)?,
+        milestones_total: r.get(7)?,
+    })
+}
+
+fn milestone_row(r: &Row) -> rusqlite::Result<Milestone> {
+    Ok(Milestone { id: r.get(0)?, journey_id: r.get(1)?, title: r.get(2)?, target_date: r.get(3)?, status: r.get(4)? })
 }
 
 /// The board's columns, left to right. New tasks go in todo, agents take theirs from
@@ -170,7 +357,7 @@ const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 pub const BACKLOG: &str = "backlog";
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
     statuses: Vec<String>,
     /// Held while the connection is open; declared after `conn` so it is released after it closes.
     _lock: Option<std::fs::File>,
@@ -225,7 +412,7 @@ impl Store {
 
     /// Runs `f` in an immediate transaction, so concurrent writers queue up
     /// on the busy timeout instead of failing halfway.
-    fn write<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    pub(crate) fn write<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         match f(&self.conn) {
             Ok(v) => {
@@ -302,7 +489,7 @@ impl Store {
 
     const PROJECT_SELECT: &str = "SELECT p.id, p.slug, p.name,
             (SELECT group_concat(repo, ',' ORDER BY r.rowid) FROM project_repos r WHERE r.project_id = p.id),
-            p.color, p.created_at,
+            p.color, p.life_area_id, p.created_at,
             (SELECT count(*) FROM tasks t WHERE t.project_id = p.id AND t.status <> ?1),
             (SELECT count(*) FROM tasks t WHERE t.project_id = p.id)
         FROM projects p";
@@ -314,9 +501,10 @@ impl Store {
             name: r.get(2)?,
             repos: r.get::<_, Option<String>>(3)?.map(|s| s.split(',').map(String::from).collect()).unwrap_or_default(),
             color: r.get(4)?,
-            created_at: r.get(5)?,
-            open: r.get(6)?,
-            total: r.get(7)?,
+            life_area_id: r.get(5)?,
+            created_at: r.get(6)?,
+            open: r.get(7)?,
+            total: r.get(8)?,
         })
     }
 
@@ -461,6 +649,16 @@ impl Store {
         self.find_project(&project.slug)
     }
 
+    /// Associates a project with one optional life area. `None` leaves it ungrouped.
+    pub fn set_project_life_area(&self, slug: &str, life_area_id: Option<i64>) -> Result<Project> {
+        if let Some(id) = life_area_id {
+            self.get_life_area(id)?;
+        }
+        let project = self.find_project(slug)?;
+        self.conn.execute("UPDATE projects SET life_area_id = ?1 WHERE id = ?2", params![life_area_id, project.id])?;
+        self.find_project(&project.slug)
+    }
+
     /// Deletes a project with all its tasks and their comments; returns the project as it was.
     pub fn delete_project(&self, slug: &str) -> Result<Project> {
         let project = self.find_project(slug)?;
@@ -469,10 +667,134 @@ impl Store {
         Ok(project)
     }
 
+    // Personal planning
+
+    pub fn list_life_areas(&self) -> Result<Vec<LifeArea>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT id, slug, name, color FROM life_areas ORDER BY position, id")?;
+        Ok(stmt
+            .query_map([], |r| Ok(LifeArea { id: r.get(0)?, slug: r.get(1)?, name: r.get(2)?, color: r.get(3)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn get_life_area(&self, id: i64) -> Result<LifeArea> {
+        self.conn
+            .query_row("SELECT id, slug, name, color FROM life_areas WHERE id = ?1", [id], |r| {
+                Ok(LifeArea { id: r.get(0)?, slug: r.get(1)?, name: r.get(2)?, color: r.get(3)? })
+            })
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("no life area #{id}")))
+    }
+
+    pub fn create_life_area(&self, slug: &str, name: &str, color: Option<&str>) -> Result<LifeArea> {
+        let slug = slug.trim().to_ascii_lowercase();
+        if !valid_slug(&slug) {
+            return Err(Error::Invalid("life area slug must use lowercase letters, digits or -".into()));
+        }
+        let name = if name.trim().is_empty() { slug.clone() } else { squash(name) };
+        let color = color.filter(|c| !c.is_empty());
+        if let Some(color) = color
+            && !PROJECT_COLORS.contains(&color)
+        {
+            return Err(Error::Invalid(format!("unknown color {color:?}")));
+        }
+        let position: f64 =
+            self.conn.query_row("SELECT coalesce(max(position), 0) + 1 FROM life_areas", [], |r| r.get(0))?;
+        self.conn.execute(
+            "INSERT INTO life_areas (slug, name, color, position) VALUES (?1, ?2, ?3, ?4)",
+            params![slug, name, color, position],
+        )?;
+        self.get_life_area(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_journeys(&self) -> Result<Vec<Journey>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT j.id, j.life_area_id, j.title, j.purpose, j.target_date, j.status,
+                (SELECT count(*) FROM milestones m WHERE m.journey_id = j.id AND m.status = 'complete'),
+                (SELECT count(*) FROM milestones m WHERE m.journey_id = j.id)
+             FROM journeys j ORDER BY j.position, j.id",
+        )?;
+        Ok(stmt.query_map([], journey_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn get_journey(&self, id: i64) -> Result<Journey> {
+        self.conn
+            .query_row(
+                "SELECT j.id, j.life_area_id, j.title, j.purpose, j.target_date, j.status,
+                    (SELECT count(*) FROM milestones m WHERE m.journey_id = j.id AND m.status = 'complete'),
+                    (SELECT count(*) FROM milestones m WHERE m.journey_id = j.id)
+                 FROM journeys j WHERE j.id = ?1",
+                [id],
+                journey_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("no journey #{id}")))
+    }
+
+    pub fn create_journey(
+        &self,
+        life_area_id: i64,
+        title: &str,
+        purpose: &str,
+        target_date: Option<&str>,
+    ) -> Result<Journey> {
+        self.get_life_area(life_area_id)?;
+        let title = clean_title(title)?;
+        let position: f64 = self.conn.query_row(
+            "SELECT coalesce(max(position), 0) + 1 FROM journeys WHERE life_area_id = ?1",
+            [life_area_id],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO journeys (life_area_id, title, purpose, target_date, position) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                life_area_id,
+                title,
+                purpose.trim(),
+                target_date.map(str::trim).filter(|d| !d.is_empty()),
+                position
+            ],
+        )?;
+        self.get_journey(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_milestones(&self) -> Result<Vec<Milestone>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, journey_id, title, target_date, status FROM milestones ORDER BY position, id",
+        )?;
+        Ok(stmt.query_map([], milestone_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn get_milestone(&self, id: i64) -> Result<Milestone> {
+        self.conn
+            .query_row(
+                "SELECT id, journey_id, title, target_date, status FROM milestones WHERE id = ?1",
+                [id],
+                milestone_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("no milestone #{id}")))
+    }
+
+    pub fn create_milestone(&self, journey_id: i64, title: &str, target_date: Option<&str>) -> Result<Milestone> {
+        self.get_journey(journey_id)?;
+        let title = clean_title(title)?;
+        let position: f64 = self.conn.query_row(
+            "SELECT coalesce(max(position), 0) + 1 FROM milestones WHERE journey_id = ?1",
+            [journey_id],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO milestones (journey_id, title, target_date, position) VALUES (?1, ?2, ?3, ?4)",
+            params![journey_id, title, target_date.map(str::trim).filter(|d| !d.is_empty()), position],
+        )?;
+        self.get_milestone(self.conn.last_insert_rowid())
+    }
+
     // Tasks
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
-            t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human
+            t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human, t.gitlab_mr, t.journey_id, t.milestone_id, t.scheduled_for
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -483,6 +805,10 @@ impl Store {
             description: r.get(3)?,
             tags: r.get::<_, String>(9)?.split(',').filter(|t| !t.is_empty()).map(String::from).collect(),
             human: r.get(10)?,
+            gitlab_mr: r.get(11)?,
+            journey_id: r.get(12)?,
+            milestone_id: r.get(13)?,
+            scheduled_for: r.get(14)?,
             status: r.get(4)?,
             position: r.get(5)?,
             created_at: r.get(6)?,
@@ -568,6 +894,164 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("no task #{id}")))
     }
 
+    /// Tasks deliberately scheduled for a local calendar day, in their board order.
+    pub fn list_scheduled_tasks(&self, day: &str) -> Result<Vec<Task>> {
+        let day = clean_day(day)?;
+        let sql = format!("{} WHERE t.scheduled_for = ?1 ORDER BY t.position", Self::TASK_SELECT);
+        let mut stmt = self.conn.prepare(&sql)?;
+        Ok(stmt.query_map([day], Self::task_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The small, intentional list of tasks that define a particular day's success.
+    pub fn list_daily_priorities(&self, day: &str) -> Result<Vec<Task>> {
+        let day = clean_day(day)?;
+        let sql = format!(
+            "{} JOIN daily_priorities d ON d.task_id = t.id WHERE d.day = ?1 ORDER BY d.position",
+            Self::TASK_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        Ok(stmt.query_map([day], Self::task_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn list_weekly_outcomes(&self, week_start: &str) -> Result<Vec<String>> {
+        let week_start = clean_day(week_start)?;
+        let mut stmt =
+            self.conn.prepare("SELECT title FROM weekly_outcomes WHERE week_start = ?1 ORDER BY position")?;
+        Ok(stmt.query_map([week_start], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Saves between zero and five concrete outcomes for a calendar week.
+    pub fn set_weekly_outcomes(&self, week_start: &str, titles: &[String]) -> Result<Vec<String>> {
+        let week_start = clean_day(week_start)?;
+        if titles.len() > 5 {
+            return Err(Error::Invalid("choose at most five weekly outcomes".into()));
+        }
+        let mut cleaned = Vec::new();
+        for title in titles {
+            let title = clean_title(title)?;
+            if !cleaned.contains(&title) {
+                cleaned.push(title);
+            }
+        }
+        self.write(|c| {
+            c.execute("DELETE FROM weekly_outcomes WHERE week_start = ?1", [&week_start])?;
+            for (position, title) in cleaned.iter().enumerate() {
+                c.execute(
+                    "INSERT INTO weekly_outcomes (week_start, position, title) VALUES (?1, ?2, ?3)",
+                    params![week_start, position as i64 + 1, title],
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(cleaned)
+    }
+
+    /// Every scheduled task in an inclusive local-date range.
+    pub fn list_tasks_scheduled_between(&self, start: &str, end: &str) -> Result<Vec<Task>> {
+        let (start, end) = (clean_day(start)?, clean_day(end)?);
+        if start > end {
+            return Err(Error::Invalid("week start must be before its end".into()));
+        }
+        let sql = format!(
+            "{} WHERE t.scheduled_for >= ?1 AND t.scheduled_for <= ?2 ORDER BY t.scheduled_for, t.position",
+            Self::TASK_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        Ok(stmt.query_map(params![start, end], Self::task_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Open scheduled work from before the selected week that needs a conscious decision.
+    pub fn list_carry_forward_tasks(&self, before: &str) -> Result<Vec<Task>> {
+        let before = clean_day(before)?;
+        let sql = format!(
+            "{} WHERE t.scheduled_for < ?1 AND t.status <> ?2 ORDER BY t.scheduled_for, t.updated_at",
+            Self::TASK_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        Ok(stmt.query_map(params![before, self.done_status()], Self::task_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn list_habits(&self) -> Result<Vec<Habit>> {
+        let mut stmt = self.conn.prepare("SELECT id, title, created_at FROM habits ORDER BY position, id")?;
+        Ok(stmt
+            .query_map([], |row| Ok(Habit { id: row.get(0)?, title: row.get(1)?, created_at: row.get(2)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn create_habit(&self, title: &str) -> Result<Habit> {
+        let title = clean_title(title)?;
+        let id = self.write(|c| {
+            let position: f64 =
+                c.query_row("SELECT coalesce(max(position), 0) + 1 FROM habits", [], |row| row.get(0))?;
+            c.execute("INSERT INTO habits (title, position) VALUES (?1, ?2)", params![title, position])?;
+            Ok(c.last_insert_rowid())
+        })?;
+        self.conn
+            .query_row("SELECT id, title, created_at FROM habits WHERE id = ?1", [id], |row| {
+                Ok(Habit { id: row.get(0)?, title: row.get(1)?, created_at: row.get(2)? })
+            })
+            .map_err(Into::into)
+    }
+
+    pub fn list_habit_checks(&self, start: &str, end: &str) -> Result<Vec<HabitCheck>> {
+        let (start, end) = (clean_day(start)?, clean_day(end)?);
+        if start > end {
+            return Err(Error::Invalid("habit range start must be before its end".into()));
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT habit_id, day FROM habit_checks WHERE day >= ?1 AND day <= ?2 ORDER BY habit_id, day")?;
+        Ok(stmt
+            .query_map(params![start, end], |row| Ok(HabitCheck { habit_id: row.get(0)?, day: row.get(1)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_habit_check(&self, habit_id: i64, day: &str, done: bool) -> Result<()> {
+        let day = clean_day(day)?;
+        self.write(|c| {
+            let exists: Option<i64> =
+                c.query_row("SELECT id FROM habits WHERE id = ?1", [habit_id], |row| row.get(0)).optional()?;
+            if exists.is_none() {
+                return Err(Error::NotFound(format!("no habit #{habit_id}")));
+            }
+            if done {
+                c.execute(
+                    "INSERT OR IGNORE INTO habit_checks (habit_id, day) VALUES (?1, ?2)",
+                    params![habit_id, day],
+                )?;
+            } else {
+                c.execute("DELETE FROM habit_checks WHERE habit_id = ?1 AND day = ?2", params![habit_id, day])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Replaces a day's priorities, preserving the caller's order. Three keeps the
+    /// list useful as a focus tool rather than another long task list.
+    pub fn set_daily_priorities(&self, day: &str, task_ids: &[i64]) -> Result<Vec<Task>> {
+        let day = clean_day(day)?;
+        if task_ids.len() > 3 {
+            return Err(Error::Invalid("choose at most three daily priorities".into()));
+        }
+        if task_ids.iter().enumerate().any(|(i, id)| task_ids[..i].contains(id)) {
+            return Err(Error::Invalid("a daily priority can only appear once".into()));
+        }
+        for id in task_ids {
+            self.get_task(*id)?;
+        }
+        self.write(|c| {
+            c.execute("DELETE FROM daily_priorities WHERE day = ?1", [&day])?;
+            for (position, task_id) in task_ids.iter().enumerate() {
+                c.execute(
+                    "INSERT INTO daily_priorities (day, task_id, position) VALUES (?1, ?2, ?3)",
+                    params![day, task_id, position as i64 + 1],
+                )?;
+            }
+            Ok(())
+        })?;
+        self.list_daily_priorities(&day)
+    }
+
     /// Looks up `api#12`, `#12` or `12`. A project prefix must match the task's project.
     pub fn find_task(&self, key: &str) -> Result<Task> {
         let (slug, id) = parse_task_key(key)?;
@@ -627,6 +1111,25 @@ impl Store {
 
     pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
         let title = patch.title.as_deref().map(clean_title).transpose()?;
+        let gitlab_mr = patch
+            .gitlab_mr
+            .as_deref()
+            .map(crate::gitlab::normalize_merge_request_url)
+            .transpose()
+            .map_err(Error::Invalid)?;
+        let scheduled_for =
+            patch.scheduled_for.as_ref().map(|day| day.as_deref().map(clean_day).transpose()).transpose()?;
+        let before = self.get_task(id)?;
+        let journey_id = patch.journey_id.clone().unwrap_or(before.journey_id);
+        if let Some(journey_id) = journey_id {
+            self.get_journey(journey_id)?;
+        }
+        if let Some(milestone_id) = patch.milestone_id.clone().unwrap_or(before.milestone_id) {
+            let milestone = self.get_milestone(milestone_id)?;
+            if Some(milestone.journey_id) != journey_id {
+                return Err(Error::Invalid("the milestone must belong to the selected journey".into()));
+            }
+        }
         if let Some(s) = &patch.status {
             self.check_status(s)?;
         }
@@ -648,6 +1151,30 @@ impl Store {
                 c.execute(
                     &format!("UPDATE tasks SET human = ?1, updated_at = {NOW} WHERE id = ?2 AND human <> ?1"),
                     params![human, id],
+                )?;
+            }
+            if let Some(gitlab_mr) = &gitlab_mr {
+                c.execute(
+                    &format!("UPDATE tasks SET gitlab_mr = ?1, updated_at = {NOW} WHERE id = ?2"),
+                    params![gitlab_mr, id],
+                )?;
+            }
+            if let Some(journey_id) = patch.journey_id {
+                c.execute(
+                    &format!("UPDATE tasks SET journey_id = ?1, updated_at = {NOW} WHERE id = ?2"),
+                    params![journey_id, id],
+                )?;
+            }
+            if let Some(milestone_id) = patch.milestone_id {
+                c.execute(
+                    &format!("UPDATE tasks SET milestone_id = ?1, updated_at = {NOW} WHERE id = ?2"),
+                    params![milestone_id, id],
+                )?;
+            }
+            if let Some(scheduled_for) = &scheduled_for {
+                c.execute(
+                    &format!("UPDATE tasks SET scheduled_for = ?1, updated_at = {NOW} WHERE id = ?2"),
+                    params![scheduled_for, id],
                 )?;
             }
             if let Some(t) = &patch.tags {
@@ -967,6 +1494,18 @@ fn clean_title(title: &str) -> Result<String> {
     Ok(title)
 }
 
+/// A user-facing local calendar day. We deliberately do not convert it to UTC:
+/// "today" must mean the same thing in the browser and the local data file.
+fn clean_day(day: &str) -> Result<String> {
+    let day = day.trim();
+    let bytes = day.as_bytes();
+    let valid = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes.iter().enumerate().all(|(i, byte)| matches!(i, 4 | 7) || byte.is_ascii_digit());
+    if valid { Ok(day.to_owned()) } else { Err(Error::Invalid("day must use YYYY-MM-DD".into())) }
+}
+
 /// Splits `api#12`, `#12` or `12` into an optional project slug and the task id.
 fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
     let key = key.trim();
@@ -1027,6 +1566,94 @@ mod tests {
         let v: String =
             s.conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
         assert_eq!(v, MIGRATIONS.len().to_string());
+    }
+
+    #[test]
+    fn planning_links_a_task_to_its_milestone() {
+        let (_dir, s) = store();
+        let area = s.create_life_area("learning", "Learning", Some("purple")).unwrap();
+        let journey = s.create_journey(area.id, "Learn Rust", "Build reliable tools", None).unwrap();
+        let milestone = s.create_milestone(journey.id, "Finish storage module", None).unwrap();
+        let project = s.create_project("kanzo", "Kanzo", None).unwrap();
+        assert_eq!(s.set_project_life_area(&project.slug, Some(area.id)).unwrap().life_area_id, Some(area.id));
+        let task = s.create_task(project.id, "Write migration", "").unwrap();
+        let task = s
+            .update_task(
+                task.id,
+                TaskPatch {
+                    journey_id: Some(Some(journey.id)),
+                    milestone_id: Some(Some(milestone.id)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((task.journey_id, task.milestone_id), (Some(journey.id), Some(milestone.id)));
+        let summary = s.list_journeys().unwrap();
+        assert_eq!((summary[0].milestones_done, summary[0].milestones_total), (0, 1));
+        let wrong_area = s.create_life_area("health", "Health", None).unwrap();
+        let other = s.create_journey(wrong_area.id, "Run", "", None).unwrap();
+        assert!(s.update_task(task.id, TaskPatch { journey_id: Some(Some(other.id)), ..Default::default() }).is_err());
+        let cleared = s
+            .update_task(task.id, TaskPatch { journey_id: Some(None), milestone_id: Some(None), ..Default::default() })
+            .unwrap();
+        assert_eq!((cleared.journey_id, cleared.milestone_id), (None, None));
+    }
+
+    #[test]
+    fn daily_priorities_are_ordered_and_scheduled_tasks_can_move_days() {
+        let (_dir, s) = store();
+        let project = s.create_project("personal", "Personal", None).unwrap();
+        let first = s.create_task(project.id, "Write weekly plan", "").unwrap();
+        let second = s.create_task(project.id, "Take a walk", "").unwrap();
+        let third = s.create_task(project.id, "Call family", "").unwrap();
+        let fourth = s.create_task(project.id, "Read", "").unwrap();
+        let day = "2026-11-01";
+        let priorities = s.set_daily_priorities(day, &[second.id, first.id, third.id]).unwrap();
+        assert_eq!(titles(&priorities), ["Take a walk", "Write weekly plan", "Call family"]);
+        assert!(s.set_daily_priorities(day, &[first.id, second.id, third.id, fourth.id]).is_err());
+        let moved =
+            s.update_task(first.id, TaskPatch { scheduled_for: Some(Some(day.into())), ..Default::default() }).unwrap();
+        assert_eq!(moved.scheduled_for.as_deref(), Some(day));
+        assert_eq!(titles(&s.list_scheduled_tasks(day).unwrap()), ["Write weekly plan"]);
+        let moved = s
+            .update_task(first.id, TaskPatch { scheduled_for: Some(Some("2026-11-02".into())), ..Default::default() })
+            .unwrap();
+        assert_eq!(moved.scheduled_for.as_deref(), Some("2026-11-02"));
+        assert!(s.list_scheduled_tasks(day).unwrap().is_empty());
+        assert!(
+            s.update_task(first.id, TaskPatch { scheduled_for: Some(Some("tomorrow".into())), ..Default::default() })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn weekly_outcomes_and_carry_forward_are_kept_separate_from_this_week() {
+        let (_dir, s) = store();
+        let project = s.create_project("personal", "Personal", None).unwrap();
+        let past = s.create_task(project.id, "Unfinished review", "").unwrap();
+        let current = s.create_task(project.id, "Plan Monday", "").unwrap();
+        s.update_task(past.id, TaskPatch { scheduled_for: Some(Some("2026-10-30".into())), ..Default::default() })
+            .unwrap();
+        s.update_task(current.id, TaskPatch { scheduled_for: Some(Some("2026-11-02".into())), ..Default::default() })
+            .unwrap();
+        let saved = s
+            .set_weekly_outcomes("2026-11-02", &["Plan calmly".into(), "Move three times".into(), "Plan calmly".into()])
+            .unwrap();
+        assert_eq!(saved, ["Plan calmly", "Move three times"]);
+        assert_eq!(titles(&s.list_tasks_scheduled_between("2026-11-02", "2026-11-08").unwrap()), ["Plan Monday"]);
+        assert_eq!(titles(&s.list_carry_forward_tasks("2026-11-02").unwrap()), ["Unfinished review"]);
+    }
+
+    #[test]
+    fn habit_checks_are_saved_per_day_and_can_be_undone() {
+        let (_dir, s) = store();
+        let habit = s.create_habit("Read 20 min").unwrap();
+        assert_eq!(s.list_habits().unwrap()[0].title, "Read 20 min");
+        s.set_habit_check(habit.id, "2026-11-01", true).unwrap();
+        assert_eq!(s.list_habit_checks("2026-10-26", "2026-11-01").unwrap().len(), 1);
+        s.set_habit_check(habit.id, "2026-11-01", false).unwrap();
+        assert!(s.list_habit_checks("2026-10-26", "2026-11-01").unwrap().is_empty());
+        assert!(s.set_habit_check(habit.id, "sunday", true).is_err());
     }
 
     #[test]
@@ -1192,6 +1819,22 @@ mod tests {
         assert_eq!((t.title.as_str(), t.status.as_str(), t.key()), ("Fix login", "todo", format!("api#{}", t.id)));
         assert_eq!(s.find_task(&t.key()).unwrap().id, t.id);
         assert!(s.find_task(&format!("web#{}", t.id)).is_err());
+        let t = s
+            .update_task(
+                t.id,
+                TaskPatch {
+                    gitlab_mr: Some("https://gitlab.com/team/platform/-/merge_requests/42?tab=diffs".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(t.gitlab_mr.as_deref(), Some("https://gitlab.com/team/platform/-/merge_requests/42"));
+        let t = s.update_task(t.id, TaskPatch { gitlab_mr: Some(String::new()), ..Default::default() }).unwrap();
+        assert!(t.gitlab_mr.is_none());
+        assert!(
+            s.update_task(t.id, TaskPatch { gitlab_mr: Some("https://example.com/nope".into()), ..Default::default() })
+                .is_err()
+        );
 
         let t = s
             .update_task(

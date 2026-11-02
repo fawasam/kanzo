@@ -30,6 +30,13 @@ tokio = { version = "1.54.1", features = ["rt", "macros", "net", "signal", "io-u
 tokio-util = "0.7.20"
 # Kanzo reads config.toml and never writes TOML.
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
+# A small blocking HTTPS client. GitLab requests run on Kanzo's blocking pool, not
+# on the board's one async thread.
+ureq = { version = "3.5.0", features = ["json"] }
+# Excel workbooks are ZIP containers. These two small, already-transitive crates let
+# Kanzo import ordinary .xlsx files and emit portable, uncompressed .xlsx exports.
+crc32fast = "1.5.0"
+flate2 = "1.1.10"
 
 [dev-dependencies]
 tempfile = "3.27.0"

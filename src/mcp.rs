@@ -186,6 +186,8 @@ struct CreateTaskArgs {
     status: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// GitLab.com merge request URL.
+    gitlab_mr: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -202,6 +204,10 @@ struct UpdateTaskArgs {
     tags: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// GitLab.com merge request URL; an empty value clears it.
+    gitlab_mr: Option<String>,
+    /// Local calendar day in YYYY-MM-DD form; null clears a scheduled day.
+    scheduled_for: Option<Option<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -397,9 +403,16 @@ impl Kanzo {
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
                 let description = args.description.as_deref().unwrap_or("");
                 let mut t = store.create_task_in(project.id, status.as_deref(), &args.title, description)?;
-                if args.tags.is_some() || args.human.is_some() {
-                    t = store
-                        .update_task(t.id, TaskPatch { tags: args.tags, human: args.human, ..Default::default() })?;
+                if args.tags.is_some() || args.human.is_some() || args.gitlab_mr.is_some() {
+                    t = store.update_task(
+                        t.id,
+                        TaskPatch {
+                            tags: args.tags,
+                            human: args.human,
+                            gitlab_mr: args.gitlab_mr,
+                            ..Default::default()
+                        },
+                    )?;
                 }
                 Ok(format!("Created {} in {}: {}", t.key(), t.status, t.title))
             })
@@ -421,6 +434,10 @@ impl Kanzo {
                         tags: args.tags,
                         project_id: None,
                         human: args.human,
+                        gitlab_mr: args.gitlab_mr,
+                        journey_id: None,
+                        milestone_id: None,
+                        scheduled_for: args.scheduled_for,
                     },
                 )?;
                 let moved = if before.status != after.status {
@@ -527,6 +544,12 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     let mut out = format!("{}#{} {}", t.project, t.id, t.title);
     write_tags(&mut out, t);
     let _ = write!(out, "\nstatus: {}", t.status);
+    if let Some(url) = &t.gitlab_mr {
+        let _ = write!(out, ", GitLab MR: {url}");
+    }
+    if let Some(day) = &t.scheduled_for {
+        let _ = write!(out, ", scheduled {day}");
+    }
     if t.human {
         out.push_str(", human: for the user, not for agents");
     }

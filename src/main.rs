@@ -1,5 +1,7 @@
 mod export;
+mod gitlab;
 mod home;
+mod jobs;
 mod mcp;
 mod service;
 mod store;

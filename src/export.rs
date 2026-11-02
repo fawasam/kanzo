@@ -39,6 +39,12 @@ struct TaskOut {
     tags: Vec<String>,
     /// Work for a person, which agents leave alone.
     human: bool,
+    /// A GitLab.com merge request linked to this task, when one is set.
+    gitlab_mr: Option<String>,
+    journey_id: Option<i64>,
+    milestone_id: Option<i64>,
+    /// Local calendar day the task is intended for, when scheduled.
+    scheduled_for: Option<String>,
     /// Paths of the images attached to the task and its comments.
     images: Vec<String>,
     status: String,
@@ -56,6 +62,10 @@ impl TaskOut {
             description: task.description,
             tags: task.tags,
             human: task.human,
+            gitlab_mr: task.gitlab_mr,
+            journey_id: task.journey_id,
+            milestone_id: task.milestone_id,
+            scheduled_for: task.scheduled_for,
             images,
             status: task.status,
             created_at: task.created_at,
@@ -142,6 +152,12 @@ fn markdown(board: &Board) -> String {
                 }
                 if !t.tags.is_empty() {
                     let _ = writeln!(md, "Tags: {}.", t.tags.join(", "));
+                }
+                if let Some(url) = &t.gitlab_mr {
+                    let _ = writeln!(md, "GitLab merge request: <{url}>.");
+                }
+                if let Some(day) = &t.scheduled_for {
+                    let _ = writeln!(md, "Scheduled for: {day}.");
                 }
                 if !t.images.is_empty() {
                     let _ = writeln!(md, "Images: {}.", t.images.join(", "));

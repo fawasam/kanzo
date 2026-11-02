@@ -61,6 +61,14 @@ Paste or drop an image into a task or a comment to attach it, as in ChatGPT. Age
 
 When a new version is out, the sidebar offers it: one click installs it and restarts the board.
 
+## GitLab merge requests
+
+Paste a GitLab.com merge-request URL into a task's **GitLab** field, then choose **Refresh** to see its state, merge status and latest pipeline. The link is part of the task and syncs with the board; its status is fetched on demand and is not stored.
+
+Public merge requests work without credentials. For private projects or better API limits, open **Settings → GitLab** and save a GitLab personal access token with `read_api`. Kanzo stores it in your operating system's local configuration folder (not in `~/kanzo`, `kanzo.db`, or the board's Git repository). You can instead provide `KANZO_GITLAB_TOKEN` when starting Kanzo; it takes precedence over the locally saved token.
+
+This first integration deliberately supports GitLab.com only. A trusted self-hosted GitLab instance needs its own explicit allow-list setting before Kanzo can make requests to it.
+
 ## Connect your agents
 
 ```sh

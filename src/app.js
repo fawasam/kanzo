@@ -16,6 +16,7 @@ if (!HTMLFormElement.prototype.requestSubmit) {
 }
 
 const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const STATUS_COLORS = ["#8a8a83", "#3b82f6", "#e8a317", "#2f9e44", "#ae3ec9", "#e8590c"];
 
 const state = {
@@ -59,6 +60,8 @@ function el(tag, attrs = {}, ...children) {
 const ICONS = {
   newProject: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/>',
   board: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7M12 7v4M16 7v9"/>',
+  calendar: '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+  calendarDays: '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/>',
   folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
@@ -746,6 +749,26 @@ $("#new-project").addEventListener("submit", async (e) => {
 // Every field is editable in place and saves when it loses focus.
 const panel = $("#panel");
 let panelTask = null;
+let gitlabStatus = null;
+let planningData = { life_areas: [], journeys: [], milestones: [] };
+
+async function loadPlanning() {
+  planningData = await api("GET", "/planning");
+  return planningData;
+}
+
+function planningSelect(select, items, value, placeholder, text) {
+  select.replaceChildren(el("option", { value: "" }, placeholder), ...items.map((item) => el("option", { value: item.id }, text(item))));
+  select.value = value == null ? "" : String(value);
+}
+
+function renderTaskPlanning(task) {
+  const journey = $("#p-journey"), milestone = $("#p-milestone");
+  planningSelect(journey, planningData.journeys, task.journey_id, "No journey", (j) => j.title);
+  const milestones = task.journey_id ? planningData.milestones.filter((m) => m.journey_id === task.journey_id) : [];
+  planningSelect(milestone, milestones, task.milestone_id, "No milestone", (m) => m.title);
+  milestone.disabled = !task.journey_id;
+}
 
 async function openTask(id) {
   leavePanelField();
@@ -758,6 +781,7 @@ async function openTask(id) {
   renderPending();
   fit($("#p-comment"));
   updateHash();
+  try { await loadPlanning(); } catch (err) { toast(err.message); }
   await refreshTask();
   if (state.task !== id) return;
   panel.classList.add("shown");
@@ -798,9 +822,12 @@ async function refreshTask() {
   $("#p-key").title = `Copy ${key(task)}`;
   // Never overwrite what is being typed or picked.
   if (!$("#p-project").contains(document.activeElement)) renderProjectPick(task);
-  for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")]]) {
+  for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")], [$("#p-gitlab-mr"), task.gitlab_mr || ""]]) {
     if (document.activeElement !== field) { field.value = value; fit(field); }
   }
+  if (gitlabStatus && gitlabStatus.url !== task.gitlab_mr) gitlabStatus = null;
+  renderGitlabStatus(task);
+  renderTaskPlanning(task);
   showDesc();
   const status = $("#p-status");
   const statuses = state.board ? state.board.statuses : [task.status];
@@ -808,6 +835,7 @@ async function refreshTask() {
   if (!statuses.includes(task.status)) status.append(el("option", { value: task.status }, task.status));
   status.value = task.status;
   $("#p-human").checked = task.human;
+  if (document.activeElement !== $("#p-scheduled-for")) $("#p-scheduled-for").value = task.scheduled_for || "";
   $("#p-created").replaceChildren(timeEl(task.created_at));
   $("#p-updated").replaceChildren(timeEl(task.updated_at));
   $("#p-comment-count").textContent = comments.length ? String(comments.length) : "";
@@ -867,6 +895,44 @@ async function patchTask(fields) {
     await refreshTask();
     loadBoard();
   } catch (e) { toast(e.message); refreshTask(); }
+}
+
+function renderGitlabStatus(task) {
+  const node = $("#p-gitlab-status");
+  const button = $("#p-gitlab-refresh");
+  button.disabled = !task.gitlab_mr;
+  if (!task.gitlab_mr) {
+    node.textContent = "No merge request linked";
+    return;
+  }
+  if (!gitlabStatus) {
+    node.replaceChildren(el("a", { href: task.gitlab_mr, target: "_blank", rel: "noopener" }, "Linked — refresh status"));
+    return;
+  }
+  const state = gitlabStatus.draft ? "draft" : gitlabStatus.state;
+  const details = [state, gitlabStatus.merge_status, gitlabStatus.pipeline_status && `pipeline ${gitlabStatus.pipeline_status}`].filter(Boolean).join(" · ");
+  const children = [
+    el("a", { href: gitlabStatus.url, target: "_blank", rel: "noopener" }, `!${gitlabStatus.url.split("/").pop()} ${gitlabStatus.title}`),
+    details ? ` — ${details}` : "",
+    gitlabStatus.pipeline_url ? el("a", { href: gitlabStatus.pipeline_url, target: "_blank", rel: "noopener" }, " View pipeline") : null,
+  ].filter((child) => child != null);
+  node.replaceChildren(...children);
+}
+
+async function refreshGitlabStatus() {
+  if (!panelTask?.gitlab_mr) return;
+  const button = $("#p-gitlab-refresh");
+  button.disabled = true;
+  button.textContent = "Loading…";
+  try {
+    gitlabStatus = await api("GET", `/tasks/${panelTask.id}/gitlab`);
+    renderGitlabStatus(panelTask);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.textContent = "Refresh";
+    button.disabled = !panelTask?.gitlab_mr;
+  }
 }
 
 // Escape undoes the field's edit; on a task just added and not saved yet, it drops the task.
@@ -929,6 +995,20 @@ $("#p-desc-view").addEventListener("focus", editDesc);
 
 $("#p-status").addEventListener("change", (e) => patchTask({ status: e.target.value }));
 $("#p-human").addEventListener("change", (e) => patchTask({ human: e.target.checked }));
+$("#p-journey").addEventListener("change", (e) => patchTask({ journey_id: e.target.value ? Number(e.target.value) : null, milestone_id: null }));
+$("#p-milestone").addEventListener("change", (e) => patchTask({ milestone_id: e.target.value ? Number(e.target.value) : null }));
+$("#p-scheduled-for").addEventListener("change", (e) => patchTask({ scheduled_for: e.target.value || null }));
+$("#p-gitlab-refresh").addEventListener("click", refreshGitlabStatus);
+$("#p-gitlab-mr").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+  else if (e.key === "Escape") cancelField(e, panelTask?.gitlab_mr || "");
+});
+$("#p-gitlab-mr").addEventListener("blur", (e) => {
+  if (!panelTask) return;
+  const value = e.target.value.trim();
+  if (value !== (panelTask.gitlab_mr || "")) patchTask({ gitlab_mr: value });
+  else e.target.value = panelTask.gitlab_mr || "";
+});
 
 // ---------- images ----------
 
@@ -1046,6 +1126,335 @@ $("#p-delete").addEventListener("click", async () => {
     await api("DELETE", `/tasks/${panelTask.id}`);
     closeTask();
     loadBoard();
+  } catch (err) { toast(err.message); }
+});
+
+// ---------- personal planning ----------
+
+function slugify(value) {
+  return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+}
+
+function renderPlanning() {
+  const { life_areas, journeys, milestones, projects } = planningData;
+  const projectSelect = $("#project-area-form [name=project]");
+  projectSelect.replaceChildren(el("option", { value: "" }, "Choose project"), ...projects.map((p) => el("option", { value: p.slug }, p.name)));
+  planningSelect($("#project-area-form [name=life_area_id]"), life_areas, null, "Choose its life area", (a) => a.name);
+  planningSelect($("#journey-form select"), life_areas, null, "Choose life area", (a) => a.name);
+  planningSelect($("#milestone-form select"), journeys, null, "Choose journey", (j) => j.title);
+  const list = $("#planning-list");
+  list.replaceChildren(...life_areas.map((area) => {
+    const areaJourneys = journeys.filter((j) => j.life_area_id === area.id);
+    return el("div", { class: "setting" },
+      el("span", { class: "text" }, area.name, el("span", {}, areaJourneys.length ? areaJourneys.map((j) => {
+        const ms = milestones.filter((m) => m.journey_id === j.id);
+        return `${j.title} — ${j.milestones_done}/${j.milestones_total} milestones${ms.length ? ` (${ms.map((m) => m.title).join(", ")})` : ""}`;
+      }).join("\n") : "No journeys yet")));
+  }));
+}
+
+async function openPlanning() {
+  try {
+    await loadPlanning();
+    renderPlanning();
+    $("#planning-dialog").hidden = false;
+    $("#life-area-form [name=name]").focus();
+  } catch (err) { toast(err.message); }
+}
+
+function closePlanning() { $("#planning-dialog").hidden = true; }
+
+$("#planning-open").addEventListener("click", openPlanning);
+$("#planning-close").addEventListener("click", closePlanning);
+$("#planning-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "planning-dialog") closePlanning(); });
+$("#life-area-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target), name = String(form.get("name") || "").trim();
+  if (!name) return;
+  try {
+    await api("POST", "/life-areas", { name, slug: slugify(name) });
+    e.target.reset(); await loadPlanning(); renderPlanning();
+  } catch (err) { toast(err.message); }
+});
+$("#project-area-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target), project = String(form.get("project") || ""), life_area_id = Number(form.get("life_area_id"));
+  if (!project || !life_area_id) { toast("Choose a project and life area"); return; }
+  try {
+    await api("PATCH", `/projects/${encodeURIComponent(project)}`, { life_area_id });
+    await loadPlanning(); renderPlanning(); loadBoard();
+  } catch (err) { toast(err.message); }
+});
+$("#journey-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target), life_area_id = Number(form.get("life_area_id")), title = String(form.get("title") || "").trim();
+  if (!life_area_id || !title) { toast("Choose a life area and name the journey"); return; }
+  try {
+    await api("POST", "/journeys", { life_area_id, title });
+    e.target.reset(); await loadPlanning(); renderPlanning();
+  } catch (err) { toast(err.message); }
+});
+$("#milestone-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target), journey_id = Number(form.get("journey_id")), title = String(form.get("title") || "").trim();
+  if (!journey_id || !title) { toast("Choose a journey and name the milestone"); return; }
+  try {
+    await api("POST", `/journeys/${journey_id}/milestones`, { title });
+    e.target.reset(); await loadPlanning(); renderPlanning();
+  } catch (err) { toast(err.message); }
+});
+
+// ---------- today ----------
+
+let todayData = null, todayBoard = null;
+
+function localDay(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
+}
+
+function nextDay(day) {
+  const date = new Date(`${day}T12:00:00`);
+  date.setDate(date.getDate() + 1);
+  return localDay(date);
+}
+
+function prettyDay(day) {
+  return new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+}
+
+function todayCandidates() {
+  const done = todayBoard.statuses[todayBoard.statuses.length - 1];
+  return todayBoard.tasks.filter((task) => task.status !== done);
+}
+
+function renderToday() {
+  const { day, priorities, scheduled } = todayData;
+  $("#today-date").textContent = prettyDay(day);
+  const quickProject = $("#today-quick-add [name=project]");
+  quickProject.replaceChildren(el("option", { value: "" }, "Choose project"), ...todayBoard.projects.map((p) => el("option", { value: p.slug }, p.name)));
+  const preferred = state.project !== "all" ? state.project : todayBoard.projects[0]?.slug;
+  quickProject.value = preferred || "";
+  const selected = priorities.map((task) => task.id);
+  const candidates = todayCandidates();
+  $$(".today-priority").forEach((select, index) => {
+    select.replaceChildren(
+      el("option", { value: "" }, "Choose a task"),
+      ...candidates.map((task) => el("option", { value: task.id }, `${task.project}#${task.id} — ${task.title}`)),
+    );
+    select.value = selected[index] == null ? "" : String(selected[index]);
+  });
+  const scheduledList = $("#today-scheduled");
+  scheduledList.replaceChildren(...(scheduled.length ? scheduled.map((task) =>
+    el("div", { class: "today-task" },
+      el("button", { class: "ghost", type: "button", onclick: () => { closeToday(); openTask(task.id); } },
+        el("span", { class: "title" }, task.title),
+        el("span", { class: "meta mono" }, `${task.project}#${task.id} · ${task.status}`)),
+      el("button", { class: "btn", type: "button", onclick: () => moveToTomorrow(task.id) }, "Tomorrow"),
+    )
+  ) : [el("div", { class: "note" }, "Nothing is scheduled yet. Add a task above to start your day.")]));
+}
+
+async function loadToday() {
+  const day = localDay();
+  [todayData, todayBoard] = await Promise.all([
+    api("GET", `/today?day=${encodeURIComponent(day)}`),
+    api("GET", "/board?project=all&done=all"),
+  ]);
+  renderToday();
+}
+
+async function openToday() {
+  try {
+    await loadToday();
+    $("#today-dialog").hidden = false;
+    $("#today-quick-add [name=title]").focus();
+  } catch (err) { toast(err.message); }
+}
+
+function closeToday() { $("#today-dialog").hidden = true; }
+
+async function moveToTomorrow(id) {
+  try {
+    await api("PATCH", `/tasks/${id}`, { scheduled_for: nextDay(todayData.day) });
+    await loadToday();
+    loadBoard();
+  } catch (err) { toast(err.message); }
+}
+
+$("#today-open").addEventListener("click", openToday);
+$("#today-close").addEventListener("click", closeToday);
+$("#today-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "today-dialog") closeToday(); });
+$("#today-quick-add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target), project = String(form.get("project") || ""), title = String(form.get("title") || "").trim();
+  if (!project || !title) { toast("Choose a project and add a task title"); return; }
+  try {
+    const task = await api("POST", "/tasks", { project, title });
+    await api("PATCH", `/tasks/${task.id}`, { scheduled_for: todayData.day });
+    e.target.reset();
+    await loadToday();
+    loadBoard();
+  } catch (err) { toast(err.message); }
+});
+$("#today-priorities").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const task_ids = $$(".today-priority").map((select) => Number(select.value)).filter(Boolean);
+  if (new Set(task_ids).size !== task_ids.length) { toast("Choose each priority only once"); return; }
+  try {
+    await api("POST", "/today/priorities", { day: todayData.day, task_ids });
+    await loadToday();
+  } catch (err) { toast(err.message); }
+});
+
+// ---------- week ----------
+
+let weekData = null;
+
+function startOfWeek(date = new Date()) {
+  const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  return localDay(monday);
+}
+
+function weekDates(start) {
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(`${start}T12:00:00`);
+    date.setDate(date.getDate() + index);
+    return localDay(date);
+  });
+}
+
+function prettyWeek(start, end) {
+  const options = { month: "short", day: "numeric" };
+  return `${new Date(`${start}T12:00:00`).toLocaleDateString(undefined, options)} – ${new Date(`${end}T12:00:00`).toLocaleDateString(undefined, options)}`;
+}
+
+function renderWeek() {
+  $("#week-range").textContent = prettyWeek(weekData.start, weekData.end);
+  $$("#week-outcomes input").forEach((input, index) => { input.value = weekData.outcomes[index] || ""; });
+  const scheduledByDay = new Map(weekDates(weekData.start).map((day) => [day, []]));
+  weekData.scheduled.forEach((task) => scheduledByDay.get(task.scheduled_for)?.push(task));
+  $("#week-grid").replaceChildren(...weekDates(weekData.start).map((day) => {
+    const date = new Date(`${day}T12:00:00`);
+    const tasks = scheduledByDay.get(day);
+    return el("section", { class: "week-day" },
+      el("h4", {}, date.toLocaleDateString(undefined, { weekday: "short" }), el("span", {}, date.toLocaleDateString(undefined, { month: "short", day: "numeric" }))),
+      ...(tasks.length ? tasks.map((task) => el("button", { class: "week-task", type: "button", onclick: () => { closeWeek(); openTask(task.id); } },
+        task.title, el("small", {}, `${task.project}#${task.id} · ${task.status}`))) : [el("p", { class: "week-empty" }, "Open space")]),
+    );
+  }));
+  $("#week-carry").replaceChildren(...(weekData.carry_forward.length ? weekData.carry_forward.map((task) =>
+    el("div", { class: "carry-task" },
+      el("button", { class: "ghost", type: "button", onclick: () => { closeWeek(); openTask(task.id); } },
+        el("span", { class: "title" }, task.title), el("small", {}, `${task.project}#${task.id} · scheduled ${task.scheduled_for}`)),
+      el("button", { class: "btn", type: "button", onclick: () => carryToWeek(task.id) }, "Move to Monday"),
+    )
+  ) : [el("p", { class: "note" }, "Nothing unfinished from before this week.")]));
+}
+
+async function loadWeek() {
+  const start = startOfWeek(), end = weekDates(start)[6];
+  weekData = await api("GET", `/week?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+  renderWeek();
+}
+
+async function openWeek() {
+  try { await loadWeek(); $("#week-dialog").hidden = false; } catch (err) { toast(err.message); }
+}
+
+function closeWeek() { $("#week-dialog").hidden = true; }
+
+async function carryToWeek(id) {
+  try {
+    await api("PATCH", `/tasks/${id}`, { scheduled_for: weekData.start });
+    await loadWeek();
+    loadBoard();
+  } catch (err) { toast(err.message); }
+}
+
+$("#week-open").addEventListener("click", openWeek);
+$("#week-close").addEventListener("click", closeWeek);
+$("#week-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "week-dialog") closeWeek(); });
+$("#week-outcomes").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const titles = $$("#week-outcomes input").map((input) => input.value.trim()).filter(Boolean);
+  if (new Set(titles).size !== titles.length) { toast("Choose each weekly outcome only once"); return; }
+  try {
+    await api("POST", "/week/outcomes", { week_start: weekData.start, titles });
+    await loadWeek();
+  } catch (err) { toast(err.message); }
+});
+
+// ---------- habits ----------
+
+let habitsData = null, habitsStart = null, habitsDays = [];
+
+function renderHabits() {
+  $("#habits-range").textContent = prettyWeek(habitsStart, habitsDays[6]);
+  const checked = new Set(habitsData.checks.map((check) => `${check.habit_id}:${check.day}`));
+  const dayHeaders = habitsDays.map((day) => {
+    const date = new Date(`${day}T12:00:00`);
+    return el("span", {}, date.toLocaleDateString(undefined, { weekday: "short" }), el("small", {}, date.toLocaleDateString(undefined, { month: "short", day: "numeric" })));
+  });
+  const rows = habitsData.habits.map((habit) => {
+    const count = habitsDays.filter((day) => checked.has(`${habit.id}:${day}`)).length;
+    return el("div", { class: "habit-row" },
+      el("span", { class: "habit-title" }, habit.title),
+      ...habitsDays.map((day) => {
+        const done = checked.has(`${habit.id}:${day}`);
+        return el("button", {
+          class: `habit-check${done ? " done" : ""}`,
+          type: "button",
+          title: `${done ? "Mark incomplete" : "Mark complete"}: ${habit.title}`,
+          "aria-label": `${done ? "Mark incomplete" : "Mark complete"}: ${habit.title}`,
+          onclick: () => toggleHabit(habit.id, day, !done),
+        }, done ? "✓" : "");
+      }),
+      el("span", { class: "habit-count" }, `${count}/7`),
+    );
+  });
+  $("#habit-grid").replaceChildren(
+    el("div", { class: "habit-days" }, el("span", { class: "habit-name-head" }, "Habit"), ...dayHeaders, el("span", {}, "Week")),
+    ...(rows.length ? rows : [el("p", { class: "note" }, "Add a habit to begin your weekly rhythm.")]),
+  );
+}
+
+async function loadHabits() {
+  habitsStart = startOfWeek();
+  habitsDays = weekDates(habitsStart);
+  habitsData = await api("GET", `/habits?start=${encodeURIComponent(habitsStart)}&end=${encodeURIComponent(habitsDays[6])}`);
+  renderHabits();
+}
+
+async function openHabits() {
+  try {
+    await loadHabits();
+    $("#habits-dialog").hidden = false;
+    $("#habit-add [name=title]").focus();
+  } catch (err) { toast(err.message); }
+}
+
+function closeHabits() { $("#habits-dialog").hidden = true; }
+
+async function toggleHabit(id, day, done) {
+  try {
+    await api("POST", `/habits/${id}/checks`, { day, done });
+    await loadHabits();
+  } catch (err) { toast(err.message); }
+}
+
+$("#habits-open").addEventListener("click", openHabits);
+$("#habits-close").addEventListener("click", closeHabits);
+$("#habits-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "habits-dialog") closeHabits(); });
+$("#habit-add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const title = String(new FormData(e.target).get("title") || "").trim();
+  if (!title) return;
+  try {
+    await api("POST", "/habits", { title });
+    e.target.reset();
+    await loadHabits();
   } catch (err) { toast(err.message); }
 });
 
@@ -1272,6 +1681,7 @@ function openSettings(section = "board") {
   $("#sync-create").hidden = !!syncRemote;
   $("#sync-error").hidden = true;
   $("#settings-version").textContent = state.board ? `Kanzo ${state.board.version}` : "";
+  loadGitlabConfig();
   showSection(section);
   $("#settings-dialog").hidden = false;
   if (section === "sync") $("#sync-url").focus();
@@ -1300,6 +1710,40 @@ $("#settings-backlog").addEventListener("change", async (e) => {
     await api("PATCH", "/settings", { backlog: box.checked });
     loadBoard();
   } catch (err) { box.checked = !box.checked; toast(err.message); }
+});
+let gitlabConfigured = false;
+async function loadGitlabConfig() {
+  try {
+    const { configured } = await api("GET", "/gitlab");
+    gitlabConfigured = configured;
+    $("#gitlab-token").value = "";
+    $("#gitlab-token").placeholder = configured ? "A token is saved locally — enter a replacement" : "Personal access token (read_api)";
+    $("#gitlab-token-status").textContent = configured ? "A local token is configured. It is never stored in the board or its sync repository." : "No token configured; public merge requests can still be refreshed.";
+    $("#gitlab-clear").hidden = !configured;
+  } catch (err) {
+    $("#gitlab-token-status").textContent = err.message;
+  }
+}
+$("#gitlab-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const token = $("#gitlab-token").value.trim();
+  if (!token) { toast("Enter a token, or choose Remove token"); return; }
+  const save = $("#gitlab-save");
+  save.disabled = true;
+  try {
+    await api("PATCH", "/gitlab", { token });
+    toast("GitLab token saved locally");
+    loadGitlabConfig();
+  } catch (err) { toast(err.message); }
+  save.disabled = false;
+});
+$("#gitlab-clear").addEventListener("click", async () => {
+  if (!gitlabConfigured || !confirm("Remove Kanzo's local GitLab token?")) return;
+  try {
+    await api("PATCH", "/gitlab", { token: "" });
+    toast("GitLab token removed");
+    loadGitlabConfig();
+  } catch (err) { toast(err.message); }
 });
 $("#settings-update").addEventListener("click", checkForUpdates);
 
@@ -1372,6 +1816,91 @@ async function installUpdate(available) {
 checkUpdate();
 setInterval(checkUpdate, 24 * 60 * 60 * 1000);
 loadSyncRemote();
+
+// ---------- jobs ----------
+
+let jobsData = null;
+const JOB_STAGES = ["saved", "draft", "applied", "interview", "offer", "rejected", "archived"];
+
+function stagePick(value, onChange) {
+  return el("select", { onchange: onChange }, ...JOB_STAGES.map((stage) => el("option", { value: stage, selected: stage === value }, stage)));
+}
+
+function renderJobs() {
+  const { jobs, preferences, unread } = jobsData;
+  const criteria = $("#jobs-preferences");
+  criteria.elements.skills.value = preferences.skills.join(", ");
+  criteria.elements.locations.value = preferences.locations.join(", ");
+  criteria.elements.excluded.value = preferences.excluded_requirements.join(", ");
+  criteria.elements.hours.value = preferences.preferred_age_hours;
+  criteria.elements.days.value = preferences.fallback_age_days;
+  criteria.elements.notifications.checked = preferences.notifications_enabled;
+  const badge = $("#jobs-unread");
+  badge.hidden = !unread; badge.textContent = unread ? String(unread) : "";
+  const list = $("#jobs-list");
+  list.replaceChildren(...(jobs.length ? jobs.map((job) => {
+    const stage = stagePick(job.stage, async (event) => {
+      try { await api("PATCH", `/jobs/${job.id}`, { stage: event.target.value }); await loadJobs(); } catch (error) { toast(error.message); }
+    });
+    const notes = el("input", { value: job.notes, placeholder: "Notes", "aria-label": `Notes for ${job.title}` });
+    notes.addEventListener("change", async () => { try { await api("PATCH", `/jobs/${job.id}`, { notes: notes.value }); await loadJobs(); } catch (error) { toast(error.message); } });
+    const follow = el("input", { type: "date", value: job.follow_up_on || "", "aria-label": `Follow-up date for ${job.title}` });
+    follow.addEventListener("change", async () => { try { await api("PATCH", `/jobs/${job.id}`, { follow_up_on: follow.value || null }); await loadJobs(); } catch (error) { toast(error.message); } });
+    const title = job.url ? el("a", { href: job.url, target: "_blank", rel: "noopener" }, job.title) : job.title;
+    return el("article", { class: "job" },
+      el("div", {}, el("h4", {}, title), el("p", {}, job.company, job.location ? ` · ${job.location}` : ""), job.source_date_note ? el("small", {}, job.source_date_note) : null),
+      el("div", {}, stage, el("small", {}, job.posted_at ? `Posted ${job.posted_at}` : "Date not verified")),
+      el("div", { class: "score" }, job.match_score ? `${job.match_score}% match` : "Not a match", job.match_reasons.length ? el("small", {}, job.match_reasons.join(" · ")) : null),
+      el("div", {}, follow, el("small", {}, "Follow-up")),
+      el("div", {}, notes),
+    );
+  }) : [el("div", { class: "empty" }, el("h1", {}, "No jobs yet"), "Add a role or import an Excel tracker. Duplicates are safely skipped.")]));
+}
+
+async function loadJobs() {
+  const query = encodeURIComponent($("#jobs-search").value || "");
+  const stage = encodeURIComponent($("#jobs-stage-filter").value || "all");
+  jobsData = await api("GET", `/jobs?q=${query}&stage=${stage}`);
+  renderJobs();
+  const notices = await api("GET", "/jobs/notifications");
+  $("#jobs-notices").textContent = notices.length ? `${jobsData.unread ? `${jobsData.unread} new · ` : ""}${notices.slice(0, 2).map((n) => n.message).join("; ")}` : "No job-match alerts yet.";
+}
+
+async function openJobs() {
+  try {
+    await loadJobs();
+    $("#jobs-dialog").hidden = false;
+    if (jobsData.unread) await api("PATCH", "/jobs/notifications");
+    $("#jobs-search").focus();
+  } catch (error) { toast(error.message); }
+}
+function closeJobs() { $("#jobs-dialog").hidden = true; }
+
+$("#jobs-open").addEventListener("click", openJobs);
+$("#jobs-close").addEventListener("click", closeJobs);
+$("#jobs-dialog").addEventListener("mousedown", (event) => { if (event.target.id === "jobs-dialog") closeJobs(); });
+$("#jobs-search").addEventListener("input", () => { clearTimeout(window.jobsSearchTimer); window.jobsSearchTimer = setTimeout(() => loadJobs().catch((error) => toast(error.message)), 180); });
+$("#jobs-stage-filter").addEventListener("change", () => loadJobs().catch((error) => toast(error.message)));
+$("#jobs-add").addEventListener("submit", async (event) => {
+  event.preventDefault(); const data = Object.fromEntries(new FormData(event.target));
+  try { await api("POST", "/jobs", data); event.target.reset(); await loadJobs(); toast("Job saved"); } catch (error) { toast(error.message); }
+});
+$("#jobs-preferences").addEventListener("submit", async (event) => {
+  event.preventDefault(); const form = event.target.elements;
+  const split = (value) => value.value.split(",").map((v) => v.trim()).filter(Boolean);
+  try { await api("PATCH", "/jobs/preferences", { skills: split(form.skills), locations: split(form.locations), excluded_requirements: split(form.excluded), preferred_age_hours: Number(form.hours.value), fallback_age_days: Number(form.days.value), notifications_enabled: form.notifications.checked }); await loadJobs(); toast("Matching criteria saved"); } catch (error) { toast(error.message); }
+});
+$("#jobs-import-open").addEventListener("click", () => $("#jobs-import").click());
+$("#jobs-import").addEventListener("change", async (event) => {
+  const file = event.target.files[0]; if (!file) return;
+  try {
+    const response = await fetch("/api/jobs/import", { method: "POST", headers: { "X-Kanzo-Filename": file.name }, body: file });
+    const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || response.statusText);
+    await loadJobs(); toast(`Imported ${result.inserted}; skipped ${result.duplicates} duplicates${result.invalid ? `; ${result.invalid} invalid` : ""}`);
+  } catch (error) { toast(error.message); }
+  event.target.value = "";
+});
+$("#jobs-export").addEventListener("click", () => { window.location.assign("/api/jobs/export"); });
 
 // Relative times ("5m ago") drift; refresh them now and then.
 setInterval(() => {

@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::home::Home;
 use crate::store::{self, Error, ImagesOf, Store, TaskPatch};
-use crate::{sync, update};
+use crate::{gitlab, jobs, sync, update};
 
 const INDEX: &str = include_str!("index.html");
 /// The largest image the board takes from a paste.
@@ -129,11 +129,28 @@ fn router(home: Home, guard: Guard, shutdown: CancellationToken) -> Router {
         .route("/api/changes", get(changes))
         .route("/api/board", get(board))
         .route("/api/search", get(search))
+        .route("/api/jobs", get(list_jobs).post(create_job))
+        .route("/api/jobs/import", post(import_jobs))
+        .route("/api/jobs/export", get(export_jobs))
+        .route("/api/jobs/preferences", patch(update_job_preferences))
+        .route("/api/jobs/notifications", get(job_notifications).patch(read_job_notifications))
+        .route("/api/jobs/{id}", patch(update_job))
         .route("/api/projects", post(create_project))
         .route("/api/projects/{slug}", patch(update_project).delete(delete_project))
         .route("/api/projects/{slug}/repos", post(link_repo).delete(unlink_repo))
         .route("/api/tasks", post(create_task))
         .route("/api/tasks/{id}", get(get_task).patch(update_task).delete(delete_task))
+        .route("/api/tasks/{id}/gitlab", get(gitlab_status))
+        .route("/api/today", get(today))
+        .route("/api/today/priorities", post(set_today_priorities))
+        .route("/api/week", get(week))
+        .route("/api/week/outcomes", post(set_week_outcomes))
+        .route("/api/habits", get(habits).post(create_habit))
+        .route("/api/habits/{id}/checks", post(set_habit_check))
+        .route("/api/planning", get(planning))
+        .route("/api/life-areas", post(create_life_area))
+        .route("/api/journeys", post(create_journey))
+        .route("/api/journeys/{id}/milestones", post(create_milestone))
         .route("/api/tasks/{id}/move", post(move_task))
         .route("/api/tasks/{id}/comments", post(add_comment))
         .route("/api/comments/{id}", delete(delete_comment))
@@ -143,6 +160,7 @@ fn router(home: Home, guard: Guard, shutdown: CancellationToken) -> Router {
         .route("/api/update", get(update_status).post(update_now))
         .route("/api/sync", get(sync_status).post(sync_now).put(sync_repo))
         .route("/api/settings", patch(update_settings))
+        .route("/api/gitlab", get(gitlab_config).patch(update_gitlab_config))
         .layer(middleware::from_fn_with_state(Arc::new(guard), protect))
         .with_state(Arc::new(home))
 }
@@ -325,6 +343,57 @@ async fn search(State(home): Shared, Query(q): Query<SearchQuery>) -> Response {
 }
 
 #[derive(Deserialize)]
+struct JobsQuery { #[serde(default)] q: String, stage: Option<String> }
+
+async fn list_jobs(State(home): Shared, Query(q): Query<JobsQuery>) -> Response {
+    with_store(home, move |_, s| s.jobs_page(&q.q, q.stage.as_deref())).await
+}
+
+async fn create_job(State(home): Shared, Json(input): Json<jobs::JobInput>) -> Response {
+    with_store(home, move |_, s| s.create_job(&input)).await
+}
+
+async fn update_job(State(home): Shared, Path(id): Path<i64>, Json(patch): Json<jobs::JobPatch>) -> Response {
+    with_store(home, move |_, s| s.update_job(id, patch)).await
+}
+
+async fn update_job_preferences(State(home): Shared, Json(patch): Json<jobs::PreferencesPatch>) -> Response {
+    with_store(home, move |_, s| s.update_job_preferences(patch)).await
+}
+
+async fn job_notifications(State(home): Shared) -> Response {
+    with_store(home, |_, s| s.notifications()).await
+}
+
+async fn read_job_notifications(State(home): Shared) -> Response {
+    with_store(home, |_, s| { s.read_notifications()?; Ok(json!({ "read": true })) }).await
+}
+
+/// Reads a user-selected workbook locally; it is capped and never sent to a job site.
+async fn import_jobs(State(home): Shared, headers: HeaderMap, body: Bytes) -> Response {
+    if body.len() > 8 * 1024 * 1024 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error":"job import is limited to 8 MB"}))).into_response();
+    }
+    let name = headers.get("x-kanzo-filename").and_then(|h| h.to_str().ok()).unwrap_or("jobs.xlsx").to_string();
+    match jobs::parse_import(&body, &name) {
+        Ok(rows) => with_store(home, move |_, s| s.import_jobs(rows)).await,
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
+    }
+}
+
+async fn export_jobs(State(home): Shared) -> Response {
+    let outcome = tokio::task::spawn_blocking(move || -> store::Result<Vec<u8>> {
+        let store = home.store()?;
+        Ok(jobs::xlsx_export(&store.list_jobs("", None)?))
+    }).await;
+    match outcome {
+        Ok(Ok(bytes)) => ([(header::CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), (header::CONTENT_DISPOSITION, "attachment; filename=kanzo-jobs.xlsx")], bytes).into_response(),
+        Ok(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":error.to_string()}))).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":error.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
 struct NewProject {
     slug: String,
     #[serde(default)]
@@ -340,6 +409,7 @@ async fn create_project(State(home): Shared, Json(p): Json<NewProject>) -> Respo
 struct ProjectPatch {
     name: Option<String>,
     color: Option<String>,
+    life_area_id: Option<Option<i64>>,
 }
 
 async fn update_project(State(home): Shared, Path(slug): Path<String>, Json(p): Json<ProjectPatch>) -> Response {
@@ -351,9 +421,67 @@ async fn update_project(State(home): Shared, Path(slug): Path<String>, Json(p): 
         if let Some(color) = &p.color {
             project = Some(s.set_project_color(&slug, color)?);
         }
+        if let Some(life_area_id) = p.life_area_id {
+            project = Some(s.set_project_life_area(&slug, life_area_id)?);
+        }
         project.map_or_else(|| s.find_project(&slug), Ok)
     })
     .await
+}
+
+#[derive(Serialize)]
+struct Planning {
+    life_areas: Vec<store::LifeArea>,
+    journeys: Vec<store::Journey>,
+    milestones: Vec<store::Milestone>,
+    projects: Vec<store::Project>,
+}
+
+async fn planning(State(home): Shared) -> Response {
+    with_store(home, |_, s| {
+        Ok(Planning {
+            life_areas: s.list_life_areas()?,
+            journeys: s.list_journeys()?,
+            milestones: s.list_milestones()?,
+            projects: s.list_projects()?,
+        })
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct NewLifeArea {
+    slug: String,
+    #[serde(default)]
+    name: String,
+    color: Option<String>,
+}
+
+async fn create_life_area(State(home): Shared, Json(a): Json<NewLifeArea>) -> Response {
+    with_store(home, move |_, s| s.create_life_area(&a.slug, &a.name, a.color.as_deref())).await
+}
+
+#[derive(Deserialize)]
+struct NewJourney {
+    life_area_id: i64,
+    title: String,
+    #[serde(default)]
+    purpose: String,
+    target_date: Option<String>,
+}
+
+async fn create_journey(State(home): Shared, Json(j): Json<NewJourney>) -> Response {
+    with_store(home, move |_, s| s.create_journey(j.life_area_id, &j.title, &j.purpose, j.target_date.as_deref())).await
+}
+
+#[derive(Deserialize)]
+struct NewMilestone {
+    title: String,
+    target_date: Option<String>,
+}
+
+async fn create_milestone(State(home): Shared, Path(id): Path<i64>, Json(m): Json<NewMilestone>) -> Response {
+    with_store(home, move |_, s| s.create_milestone(id, &m.title, m.target_date.as_deref())).await
 }
 
 #[derive(Deserialize)]
@@ -393,6 +521,120 @@ async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
     .await
 }
 
+#[derive(Deserialize)]
+struct TodayQuery {
+    day: String,
+}
+
+#[derive(Serialize)]
+struct Today {
+    day: String,
+    priorities: Vec<store::Task>,
+    scheduled: Vec<store::Task>,
+}
+
+/// A focused day view: the selected Top 3 is separate from the complete schedule.
+async fn today(State(home): Shared, Query(q): Query<TodayQuery>) -> Response {
+    with_store(home, move |_, s| {
+        Ok(Today {
+            priorities: s.list_daily_priorities(&q.day)?,
+            scheduled: s.list_scheduled_tasks(&q.day)?,
+            day: q.day,
+        })
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct TodayPriorities {
+    day: String,
+    task_ids: Vec<i64>,
+}
+
+async fn set_today_priorities(State(home): Shared, Json(p): Json<TodayPriorities>) -> Response {
+    with_store(home, move |_, s| s.set_daily_priorities(&p.day, &p.task_ids)).await
+}
+
+#[derive(Deserialize)]
+struct WeekQuery {
+    start: String,
+    end: String,
+}
+
+#[derive(Serialize)]
+struct Week {
+    start: String,
+    end: String,
+    outcomes: Vec<String>,
+    scheduled: Vec<store::Task>,
+    carry_forward: Vec<store::Task>,
+}
+
+async fn week(State(home): Shared, Query(q): Query<WeekQuery>) -> Response {
+    with_store(home, move |_, s| {
+        Ok(Week {
+            outcomes: s.list_weekly_outcomes(&q.start)?,
+            scheduled: s.list_tasks_scheduled_between(&q.start, &q.end)?,
+            carry_forward: s.list_carry_forward_tasks(&q.start)?,
+            start: q.start,
+            end: q.end,
+        })
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct WeekOutcomes {
+    week_start: String,
+    titles: Vec<String>,
+}
+
+async fn set_week_outcomes(State(home): Shared, Json(p): Json<WeekOutcomes>) -> Response {
+    with_store(home, move |_, s| s.set_weekly_outcomes(&p.week_start, &p.titles)).await
+}
+
+#[derive(Deserialize)]
+struct HabitQuery {
+    start: String,
+    end: String,
+}
+
+#[derive(Serialize)]
+struct Habits {
+    habits: Vec<store::Habit>,
+    checks: Vec<store::HabitCheck>,
+}
+
+async fn habits(State(home): Shared, Query(q): Query<HabitQuery>) -> Response {
+    with_store(home, move |_, s| {
+        Ok(Habits { habits: s.list_habits()?, checks: s.list_habit_checks(&q.start, &q.end)? })
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct NewHabit {
+    title: String,
+}
+
+async fn create_habit(State(home): Shared, Json(habit): Json<NewHabit>) -> Response {
+    with_store(home, move |_, s| s.create_habit(&habit.title)).await
+}
+
+#[derive(Deserialize)]
+struct HabitCheckPatch {
+    day: String,
+    done: bool,
+}
+
+async fn set_habit_check(State(home): Shared, Path(id): Path<i64>, Json(check): Json<HabitCheckPatch>) -> Response {
+    with_store(home, move |_, s| {
+        s.set_habit_check(id, &check.day, check.done)?;
+        Ok(json!({ "habit_id": id, "day": check.day, "done": check.done }))
+    })
+    .await
+}
+
 /// Board settings, kept in kanzo.db so they sync with the board.
 #[derive(Deserialize)]
 struct Settings {
@@ -401,6 +643,45 @@ struct Settings {
 
 async fn update_settings(State(home): Shared, Json(r): Json<Settings>) -> Response {
     with_store(home, move |_, s| s.set_backlog(r.backlog)).await
+}
+
+#[derive(Serialize)]
+struct GitLabConfig {
+    configured: bool,
+}
+
+async fn gitlab_config() -> Response {
+    match tokio::task::spawn_blocking(gitlab::is_configured).await {
+        Ok(Ok(configured)) => Json(GitLabConfig { configured }).into_response(),
+        Ok(Err(error)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error.to_string() }))).into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitLabConfigPatch {
+    token: String,
+}
+
+/// A board exposed on a LAN has no TLS or login, so accepting a token over that
+/// connection would expose it. Local boards can save it outside the synced data folder.
+async fn update_gitlab_config(State(home): Shared, Json(p): Json<GitLabConfigPatch>) -> Response {
+    if !home.config.listen.is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "save the GitLab token on a localhost board only; use KANZO_GITLAB_TOKEN for a network board" })),
+        )
+            .into_response();
+    }
+    match tokio::task::spawn_blocking(move || gitlab::set_token(&p.token)).await {
+        Ok(Ok(configured)) => Json(GitLabConfig { configured }).into_response(),
+        Ok(Err(error)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error.to_string() }))).into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error.to_string() }))).into_response(),
+    }
 }
 
 #[derive(Serialize)]
@@ -425,6 +706,10 @@ struct Patch {
     project: Option<String>,
     tags: Option<String>,
     human: Option<bool>,
+    gitlab_mr: Option<String>,
+    journey_id: Option<Option<i64>>,
+    milestone_id: Option<Option<i64>>,
+    scheduled_for: Option<Option<String>>,
 }
 
 async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Patch>) -> Response {
@@ -439,10 +724,43 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 project_id,
                 tags: p.tags,
                 human: p.human,
+                gitlab_mr: p.gitlab_mr,
+                journey_id: p.journey_id,
+                milestone_id: p.milestone_id,
+                scheduled_for: p.scheduled_for,
             },
         )
     })
     .await
+}
+
+/// Looks up a task's linked GitLab merge request without ever writing credentials
+/// or the transient result to the synced board database.
+async fn gitlab_status(State(home): Shared, Path(id): Path<i64>) -> Response {
+    let outcome = tokio::task::spawn_blocking(
+        move || -> std::result::Result<gitlab::MergeRequestStatus, (StatusCode, String)> {
+            let store = home.store().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let task = store.get_task(id).map_err(|e| {
+                let status = match e {
+                    Error::NotFound(_) => StatusCode::NOT_FOUND,
+                    Error::Invalid(_) => StatusCode::BAD_REQUEST,
+                    Error::Busy(_) => StatusCode::SERVICE_UNAVAILABLE,
+                    Error::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                (status, e.to_string())
+            })?;
+            let url = task
+                .gitlab_mr
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "this task has no GitLab merge request".into()))?;
+            gitlab::merge_request(&url).map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
+        },
+    )
+    .await;
+    match outcome {
+        Ok(Ok(status)) => Json(status).into_response(),
+        Ok(Err((status, error))) => (status, Json(json!({ "error": error }))).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error.to_string() }))).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
